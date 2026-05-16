@@ -318,7 +318,7 @@ body::before {
       <div class="results-title">Результати</div>
       <div class="results-count" id="resultsCount"></div>
     </div>
-    <div id="carsList"></div>
+    <div id="carsList" class="cars-list"></div>
   </div>
 </div>
 
@@ -535,22 +535,93 @@ async function doSearch() {
   }
 }
 
+async function loadCarPhotos(autoId) {
+  if (!autoId) return [];
+  try {
+    const res = await fetch(`${API}/auto/fotos/${autoId}?api_key=${API_KEY}`);
+    const data = await res.json();
+    const group = data?.data?.[autoId] || data?.data?.[String(autoId)] || {};
+    return Object.values(group)
+      .map(getBestPhotoUrl)
+      .filter(Boolean);
+  } catch(e) {
+    return [];
+  }
+}
+
+async function ensureCarPhotos(div, autoId, photos) {
+  if (div.dataset.galleryLoaded === '1' || photos.length > 1) return photos;
+  if (div.dataset.galleryLoading === '1') return photos;
+  div.dataset.galleryLoading = '1';
+  const gallery = await loadCarPhotos(autoId);
+  gallery.forEach(url => addPhoto(photos, url));
+  if (photos.length > 1) div.dataset.galleryLoaded = '1';
+  div.dataset.galleryLoading = '0';
+  div.dataset.photos = JSON.stringify(photos);
+  return photos;
+}
+
+function getBestPhotoUrl(photo) {
+  if (!photo) return '';
+  if (Array.isArray(photo.formats) && photo.formats.length) {
+    return photo.formats[photo.formats.length - 1] || photo.formats[0];
+  }
+  return photo.seoLinkF || photo.seoLinkB || photo.seoLinkM || photo.url || '';
+}
+
+function firstValue(...values) {
+  return values.find(value => value !== undefined && value !== null && String(value).trim() !== '');
+}
+
+function formatRace(value, raceInt) {
+  const race = firstValue(value, raceInt);
+  if (race === undefined) return '—';
+  const text = String(race).trim();
+  if (/км|km|тыс|тис/i.test(text)) return text;
+  const numeric = Number(text);
+  if (!Number.isFinite(numeric)) return text;
+  return numeric < 1000 ? `${numeric} тис. км` : `${numeric.toLocaleString()} км`;
+}
+
+function escapeHTML(value) {
+  return String(value ?? '').replace(/[&<>"']/g, char => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#039;'
+  })[char]);
+}
+
+function addPhoto(photos, url) {
+  if (url && !photos.includes(url)) photos.push(url);
+}
+
+function buildSlideHTML(url, title, photoIndex, cardIndex) {
+  return `
+    <div class="car-slide" data-photo="${photoIndex}" data-card="${cardIndex}">
+      <img class="car-img" src="${escapeHTML(url)}" alt="${escapeHTML(title)}" loading="lazy" onerror="this.parentElement.innerHTML='<div class=car-img-placeholder>🚗</div>'">
+    </div>
+  `;
+}
+
 function buildCarCard(car, index) {
   const div = document.createElement('div');
   div.className = 'car-card';
   div.style.animationDelay = (index * 0.06) + 's';
 
+  const auto = car.autoData || {};
   const title = car.title || `${car.markName || ''} ${car.modelName || ''}`.trim() || 'Авто';
   const price = car.USD ? `$${Number(car.USD).toLocaleString()}` : (car.UAH ? `${Math.round(car.UAH/1000)}к ₴` : 'Ціна не вказана');
-  const year = car.year || '—';
-  const race = car.race ? `${car.race} км` : '—';
-  const fuel = car.fuelName || '—';
-  const gear = car.gearboxName || '—';
-  const city = car.cityName || car.city?.name || '';
-  const autoId = car.autoId;
+  const year = firstValue(auto.year, car.year) || '—';
+  const race = formatRace(auto.race, auto.raceInt ?? car.raceInt ?? car.race);
+  const fuel = firstValue(auto.fuelName, car.fuelName, car.fuel?.name) || '—';
+  const gear = firstValue(auto.gearboxName, car.gearboxName, car.gearbox?.name) || '—';
+  const city = firstValue(car.locationCityName, car.stateData?.name, car.cityName, car.city?.name) || '';
+  const autoId = auto.autoId || car.autoId;
   
   // Try multiple link formats - Auto.ria changes them frequently
-  const link = `https://auto.ria.com/uk/auto_${autoId}.html`;
+  const link = car.linkToView ? `https://auto.ria.com${car.linkToView}` : `https://auto.ria.com/uk/auto_${autoId}.html`;
 
   // Photos - collect high quality versions
   const photos = [];
@@ -558,25 +629,26 @@ function buildCarCard(car, index) {
   // Main photo - prefer largest size
   if (car.photoData) {
     // seoLinkF is full size (biggest), seoLinkB is big, seoLinkM is medium
-    if (car.photoData.seoLinkF) photos.push(car.photoData.seoLinkF);
-    else if (car.photoData.seoLinkB) photos.push(car.photoData.seoLinkB);
-    else if (car.photoData.seoLinkM) photos.push(car.photoData.seoLinkM);
+    addPhoto(photos, car.photoData.seoLinkF || car.photoData.seoLinkB || car.photoData.seoLinkM);
   }
+
+  (car.galleryPhotos || []).forEach(url => addPhoto(photos, url));
   
   // Additional photos
   if (car.additionalParams?.photos?.length) {
     car.additionalParams.photos.slice(0, 6).forEach(p => {
       const url = p.seoLinkF || p.seoLinkB || p.seoLinkM;
-      if (url && !photos.includes(url)) photos.push(url);
+      addPhoto(photos, url);
     });
   }
   
   const photoCount = car.photoData?.count || photos.length || 0;
+  const canHaveMorePhotos = photoCount > 1;
 
   // Build slider
   let sliderHTML = '';
   if (photos.length > 0) {
-    const navHTML = photos.length > 1 
+    const navHTML = canHaveMorePhotos
       ? `<div class="slider-nav prev" data-nav="prev-${index}">‹</div>
          <div class="slider-nav next" data-nav="next-${index}">›</div>`
       : '';
@@ -589,11 +661,7 @@ function buildCarCard(car, index) {
 
     sliderHTML = `
       <div class="car-slider" data-slider="${index}">
-        ${photos.map((url, i) => `
-          <div class="car-slide" data-photo="${i}" data-card="${index}">
-            <img class="car-img" src="${url}" alt="${title}" loading="lazy" onerror="this.parentElement.innerHTML='<div class=car-img-placeholder>🚗</div>'">
-          </div>
-        `).join('')}
+        ${photos.map((url, i) => buildSlideHTML(url, title, i, index)).join('')}
       </div>
       ${navHTML}
       ${dotsHTML}
@@ -605,32 +673,32 @@ function buildCarCard(car, index) {
   div.innerHTML = `
     <div class="car-img-wrap">
       ${sliderHTML}
-      <div class="car-price-badge">${price}</div>
+      <div class="car-price-badge">${escapeHTML(price)}</div>
       ${photoCount > 1 ? `<div class="car-photo-count">📷 ${photoCount}</div>` : ''}
     </div>
     <div class="car-body">
-      <div class="car-title">${title}</div>
+      <div class="car-title">${escapeHTML(title)}</div>
       <div class="car-stats">
         <div class="car-stat">
           <div class="car-stat-label">Рік</div>
-          <div class="car-stat-value">${year}</div>
+          <div class="car-stat-value">${escapeHTML(year)}</div>
         </div>
         <div class="car-stat">
           <div class="car-stat-label">Пробіг</div>
-          <div class="car-stat-value">${race}</div>
+          <div class="car-stat-value">${escapeHTML(race)}</div>
         </div>
         <div class="car-stat">
           <div class="car-stat-label">Пальне</div>
-          <div class="car-stat-value">${fuel}</div>
+          <div class="car-stat-value">${escapeHTML(fuel)}</div>
         </div>
         <div class="car-stat">
           <div class="car-stat-label">КПП</div>
-          <div class="car-stat-value">${gear}</div>
+          <div class="car-stat-value">${escapeHTML(gear)}</div>
         </div>
       </div>
       <div class="car-footer">
-        <div class="car-location">${city ? '📍 ' + city : ''}</div>
-        <button class="car-open-btn" data-link="${link}">Відкрити →</button>
+        <div class="car-location">${city ? '📍 ' + escapeHTML(city) : ''}</div>
+        <button class="car-open-btn" data-link="${escapeHTML(link)}">Відкрити →</button>
       </div>
     </div>`;
 
@@ -638,20 +706,79 @@ function buildCarCard(car, index) {
   div.dataset.photos = JSON.stringify(photos);
 
   // Slider logic
-  if (photos.length > 1) {
+  if (photos.length > 0) {
     const slider = div.querySelector(`[data-slider="${index}"]`);
-    const dotsWrap = div.querySelector(`[data-dots="${index}"]`);
-    const dots = dotsWrap ? dotsWrap.querySelectorAll('.slider-dot') : [];
     const prevBtn = div.querySelector(`[data-nav="prev-${index}"]`);
     const nextBtn = div.querySelector(`[data-nav="next-${index}"]`);
 
     let currentSlide = 0;
+    let loadingGallery = false;
+
+    const updateDots = () => {
+      const dotsWrap = div.querySelector(`[data-dots="${index}"]`);
+      if (!dotsWrap) return;
+      dotsWrap.querySelectorAll('.slider-dot').forEach((d, i) => {
+        d.classList.toggle('active', i === currentSlide);
+      });
+    };
+
+    const bindSlides = () => {
+      div.querySelectorAll('.car-slide').forEach(slide => {
+        if (slide.dataset.bound === '1') return;
+        slide.dataset.bound = '1';
+        slide.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          await loadGalleryIntoSlider();
+          const photoIndex = Math.min(parseInt(slide.dataset.photo), photos.length - 1);
+          openPhotoViewer(photos, photoIndex);
+        });
+      });
+    };
+
+    const renderDots = () => {
+      let dotsWrap = div.querySelector(`[data-dots="${index}"]`);
+      if (photos.length < 2) {
+        dotsWrap?.remove();
+        return;
+      }
+      if (!dotsWrap) {
+        dotsWrap = document.createElement('div');
+        dotsWrap.className = 'slider-dots';
+        dotsWrap.dataset.dots = index;
+        div.querySelector('.car-img-wrap').appendChild(dotsWrap);
+      }
+      dotsWrap.innerHTML = photos.map((_, i) => `<div class="slider-dot ${i===currentSlide?'active':''}" data-slide="${i}"></div>`).join('');
+      dotsWrap.querySelectorAll('.slider-dot').forEach((dot, i) => {
+        dot.addEventListener('click', (e) => {
+          e.stopPropagation();
+          updateSlide(i);
+        });
+      });
+    };
+
+    const loadGalleryIntoSlider = async () => {
+      if (!canHaveMorePhotos || photos.length > 1 || loadingGallery) return false;
+      loadingGallery = true;
+      div.classList.add('loading-gallery');
+      const before = photos.length;
+      await ensureCarPhotos(div, autoId, photos);
+      const newPhotos = photos.slice(before);
+      newPhotos.forEach((url, offset) => {
+        slider.insertAdjacentHTML('beforeend', buildSlideHTML(url, title, before + offset, index));
+      });
+      bindSlides();
+      renderDots();
+      div.classList.remove('loading-gallery');
+      loadingGallery = false;
+      return photos.length > before;
+    };
 
     const updateSlide = (newIndex) => {
+      if (!photos.length) return;
       currentSlide = newIndex;
       const slideWidth = slider.offsetWidth;
       slider.scrollTo({ left: currentSlide * slideWidth, behavior: 'smooth' });
-      dots.forEach((d, i) => d.classList.toggle('active', i === currentSlide));
+      updateDots();
     };
 
     slider.addEventListener('scroll', () => {
@@ -660,38 +787,30 @@ function buildCarCard(car, index) {
       const newSlide = Math.round(scrolled / slideWidth);
       if (newSlide !== currentSlide) {
         currentSlide = newSlide;
-        dots.forEach((d, i) => d.classList.toggle('active', i === currentSlide));
+        updateDots();
       }
     });
 
-    dots.forEach((dot, i) => {
-      dot.addEventListener('click', (e) => {
-        e.stopPropagation();
-        updateSlide(i);
-      });
-    });
+    renderDots();
 
-    prevBtn?.addEventListener('click', (e) => {
+    prevBtn?.addEventListener('click', async (e) => {
       e.stopPropagation();
-      const newIndex = currentSlide > 0 ? currentSlide - 1 : photos.length - 1;
+      const loadedNow = await loadGalleryIntoSlider();
+      if (photos.length < 2) return;
+      const newIndex = loadedNow ? photos.length - 1 : (currentSlide > 0 ? currentSlide - 1 : photos.length - 1);
       updateSlide(newIndex);
     });
 
-    nextBtn?.addEventListener('click', (e) => {
+    nextBtn?.addEventListener('click', async (e) => {
       e.stopPropagation();
-      const newIndex = currentSlide < photos.length - 1 ? currentSlide + 1 : 0;
+      const loadedNow = await loadGalleryIntoSlider();
+      if (photos.length < 2) return;
+      const newIndex = loadedNow ? 1 : (currentSlide < photos.length - 1 ? currentSlide + 1 : 0);
       updateSlide(newIndex);
     });
+
+    bindSlides();
   }
-
-  // Fullscreen viewer on photo tap
-  div.querySelectorAll('.car-slide').forEach(slide => {
-    slide.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const photoIndex = parseInt(slide.dataset.photo);
-      openPhotoViewer(photos, photoIndex);
-    });
-  });
 
   div.querySelector('.car-open-btn').addEventListener('click', e => {
     e.stopPropagation();
@@ -717,25 +836,60 @@ function openPhotoViewer(photos, startIndex) {
   viewerIndex = startIndex;
   showViewerPhoto();
   photoViewer.classList.add('open');
+  document.body.style.overflow = 'hidden';
 }
 
 function showViewerPhoto() {
+  if (!viewerPhotos.length) return;
   viewerImg.src = viewerPhotos[viewerIndex];
   viewerCounter.textContent = `${viewerIndex + 1} / ${viewerPhotos.length}`;
+  const hasManyPhotos = viewerPhotos.length > 1;
+  viewerPrev.style.display = hasManyPhotos ? 'flex' : 'none';
+  viewerNext.style.display = hasManyPhotos ? 'flex' : 'none';
+  viewerCounter.style.display = hasManyPhotos ? 'block' : 'none';
 }
 
-viewerClose.addEventListener('click', () => photoViewer.classList.remove('open'));
-photoViewer.addEventListener('click', (e) => { if (e.target === photoViewer) photoViewer.classList.remove('open'); });
+function closePhotoViewer() {
+  photoViewer.classList.remove('open');
+  viewerImg.src = '';
+  document.body.style.overflow = '';
+}
 
-viewerPrev.addEventListener('click', () => {
+function showPrevViewerPhoto() {
+  if (viewerPhotos.length < 2) return;
   viewerIndex = viewerIndex > 0 ? viewerIndex - 1 : viewerPhotos.length - 1;
   showViewerPhoto();
-});
+}
 
-viewerNext.addEventListener('click', () => {
+function showNextViewerPhoto() {
+  if (viewerPhotos.length < 2) return;
   viewerIndex = viewerIndex < viewerPhotos.length - 1 ? viewerIndex + 1 : 0;
   showViewerPhoto();
+}
+
+viewerClose.addEventListener('click', closePhotoViewer);
+photoViewer.addEventListener('click', (e) => { if (e.target === photoViewer) closePhotoViewer(); });
+viewerPrev.addEventListener('click', showPrevViewerPhoto);
+viewerNext.addEventListener('click', showNextViewerPhoto);
+
+document.addEventListener('keydown', (e) => {
+  if (!photoViewer.classList.contains('open')) return;
+  if (e.key === 'Escape') closePhotoViewer();
+  if (e.key === 'ArrowLeft') showPrevViewerPhoto();
+  if (e.key === 'ArrowRight') showNextViewerPhoto();
 });
+
+let viewerTouchStartX = 0;
+photoViewer.addEventListener('touchstart', (e) => {
+  viewerTouchStartX = e.touches[0]?.clientX || 0;
+}, { passive: true });
+
+photoViewer.addEventListener('touchend', (e) => {
+  const endX = e.changedTouches[0]?.clientX || 0;
+  const diff = endX - viewerTouchStartX;
+  if (Math.abs(diff) < 45) return;
+  diff > 0 ? showPrevViewerPhoto() : showNextViewerPhoto();
+}, { passive: true });
 
 // ── FILTERS ───────────────────────────────────────────────────────────────────
 function saveF() { try { localStorage.setItem('aria_filters', JSON.stringify(filters)); } catch(e){} }
