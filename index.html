@@ -384,6 +384,8 @@ let selectedBrand = null, selectedModel = null;
 let activeFilter = null, editId = null;
 let filters = [];
 try { filters = JSON.parse(localStorage.getItem('aria_filters') || '[]'); } catch(e){}
+let brandsPromise = null;
+let brandsLoaded = false;
 
 // ── ELEMENTS ──────────────────────────────────────────────────────────────────
 const brandInput = document.getElementById('brandInput');
@@ -401,21 +403,75 @@ const resultsCount = document.getElementById('resultsCount');
 
 // ── LOAD BRANDS ───────────────────────────────────────────────────────────────
 async function loadBrands() {
-  try {
-    const res = await fetch(`${API}/auto/categories/1/marks?api_key=${API_KEY}`);
-    brands = await res.json();
-  } catch(e) { showToast('Помилка завантаження марок'); }
+  if (brandsPromise) return brandsPromise;
+  const cachedBrands = readCache('aria_brands');
+  if (cachedBrands.length && !brands.length) {
+    brands = cachedBrands;
+    brandsLoaded = true;
+    return true;
+  }
+
+  brandsPromise = (async () => {
+    try {
+      const res = await fetch(`${API}/auto/categories/1/marks?api_key=${API_KEY}`);
+      const data = await res.json();
+      if (!Array.isArray(data)) throw new Error(data?.error || 'Bad marks response');
+      brands = data;
+      brandsLoaded = true;
+      writeCache('aria_brands', brands);
+      return true;
+    } catch(e) {
+      if (!brands.length) showToast(apiErrorText(e, 'марок'));
+      return false;
+    } finally {
+      brandsPromise = null;
+    }
+  })();
+
+  return brandsPromise;
 }
 
 async function loadModels(markId) {
+  const cacheKey = `aria_models_${markId}`;
+  const cachedModels = readCache(cacheKey);
+  if (cachedModels.length) models = cachedModels;
+
   try {
     const res = await fetch(`${API}/auto/categories/1/marks/${markId}/models?api_key=${API_KEY}`);
-    models = await res.json();
-  } catch(e) { models = []; }
+    const data = await res.json();
+    if (!Array.isArray(data)) throw new Error(data?.error || 'Bad models response');
+    models = data;
+    writeCache(cacheKey, models);
+    return true;
+  } catch(e) {
+    if (!models.length) showToast(apiErrorText(e, 'моделей'));
+    return false;
+  }
+}
+
+function readCache(key) {
+  try {
+    const data = JSON.parse(localStorage.getItem(key) || '[]');
+    return Array.isArray(data) ? data : [];
+  } catch(e) {
+    return [];
+  }
+}
+
+function writeCache(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch(e){}
+}
+
+function apiErrorText(error, label) {
+  const message = String(error?.message || '');
+  if (/ліміт|лимит|limit|HourOverlimit/i.test(message)) {
+    return `Ліміт API для ${label}. Спробуй трохи пізніше.`;
+  }
+  return `Помилка завантаження ${label}`;
 }
 
 // ── DROPDOWN ──────────────────────────────────────────────────────────────────
-function openDrop(anchorEl, items, labelKey, cb) {
+function openDrop(anchorEl, items, labelKey, cb, emptyText = 'Нічого не знайдено') {
   const rect = anchorEl.getBoundingClientRect();
   const gap = 6;
   const maxH = Math.min(window.innerHeight - rect.bottom - gap - 16, window.innerHeight * 0.46);
@@ -426,7 +482,7 @@ function openDrop(anchorEl, items, labelKey, cb) {
   dropBox.style.maxHeight = maxH + 'px';
 
   if (!items.length) {
-    dropBox.innerHTML = '<div class="drop-empty">Нічого не знайдено</div>';
+    dropBox.innerHTML = `<div class="drop-empty">${emptyText}</div>`;
   } else {
     dropBox.innerHTML = items.slice(0, 60).map(it =>
       `<div class="drop-item" data-idx="${items.indexOf(it)}"><span class="di">›</span>${it[labelKey]}</div>`
@@ -449,8 +505,12 @@ brandInput.addEventListener('input', () => {
   updateBtn(); showBrandDrop();
 });
 
-function showBrandDrop() {
-  if (!brands.length) { loadBrands().then(() => showBrandDrop()); return; }
+async function showBrandDrop() {
+  if (!brands.length) {
+    openDrop(brandInput, [], 'name', () => {}, 'Завантажуємо марки…');
+    await loadBrands();
+    if (!brands.length) return;
+  }
   const q = brandInput.value.trim().toLowerCase();
   const list = q ? brands.filter(b => b.name.toLowerCase().includes(q)) : brands;
   openDrop(brandInput, list, 'name', async (item) => {
@@ -470,8 +530,12 @@ modelInput.addEventListener('input', () => {
   selectedModel = null; updateBtn(); showModelDrop();
 });
 
-function showModelDrop() {
+async function showModelDrop() {
   if (!selectedBrand) return;
+  if (!models.length) {
+    openDrop(modelInput, [], 'name', () => {}, 'Завантажуємо моделі…');
+    await loadModels(selectedBrand.value);
+  }
   const q = modelInput.value.trim().toLowerCase();
   const list = q ? models.filter(m => m.name.toLowerCase().includes(q)) : models;
   openDrop(modelInput, list, 'name', (item) => {
