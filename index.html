@@ -383,7 +383,13 @@ let brands = [], models = [];
 let selectedBrand = null, selectedModel = null;
 let activeFilter = null, editId = null;
 let filters = [];
-try { filters = JSON.parse(localStorage.getItem('aria_filters') || '[]'); } catch(e){}
+try {
+  filters = JSON.parse(localStorage.getItem('aria_filters') || '[]');
+} catch(e) {
+  console.warn('Failed to parse saved filters, resetting to empty:', e);
+  filters = [];
+  try { localStorage.removeItem('aria_filters'); } catch(_) {}
+}
 let brandsPromise = null;
 let brandsLoaded = false;
 
@@ -414,6 +420,7 @@ async function loadBrands() {
   brandsPromise = (async () => {
     try {
       const res = await fetch(`${API}/auto/categories/1/marks?api_key=${API_KEY}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
       const data = await res.json();
       if (!Array.isArray(data)) throw new Error(data?.error || 'Bad marks response');
       brands = data;
@@ -438,6 +445,7 @@ async function loadModels(markId) {
 
   try {
     const res = await fetch(`${API}/auto/categories/1/marks/${markId}/models?api_key=${API_KEY}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
     const data = await res.json();
     if (!Array.isArray(data)) throw new Error(data?.error || 'Bad models response');
     models = data;
@@ -454,12 +462,18 @@ function readCache(key) {
     const data = JSON.parse(localStorage.getItem(key) || '[]');
     return Array.isArray(data) ? data : [];
   } catch(e) {
+    console.warn(`Cache read failed for "${key}", clearing entry:`, e);
+    try { localStorage.removeItem(key); } catch(_) {}
     return [];
   }
 }
 
 function writeCache(key, value) {
-  try { localStorage.setItem(key, JSON.stringify(value)); } catch(e){}
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch(e) {
+    console.warn(`Cache write failed for "${key}" (storage may be full):`, e);
+  }
 }
 
 function apiErrorText(error, label) {
@@ -572,6 +586,7 @@ async function doSearch() {
     }
 
     const res = await fetch(`${API}/auto/search?${params}`);
+    if (!res.ok) throw new Error(`Search API error: HTTP ${res.status}`);
     const data = await res.json();
 
     if (!data.result || !data.result.search_result || !data.result.search_result.ids?.length) {
@@ -585,8 +600,14 @@ async function doSearch() {
     resultsCount.textContent = `${total.toLocaleString()} оголошень`;
 
     carsList.innerHTML = '';
+    let failedCount = 0;
     const cars = await Promise.all(ids.map(id =>
-      fetch(`${API}/auto/info?api_key=${API_KEY}&auto_id=${id}`).then(r => r.json()).catch(() => null)
+      fetch(`${API}/auto/info?api_key=${API_KEY}&auto_id=${id}`)
+        .then(r => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.json();
+        })
+        .catch(e => { console.warn(`Failed to load car ${id}:`, e); failedCount++; return null; })
     ));
 
     cars.filter(Boolean).forEach((car, i) => {
@@ -594,8 +615,18 @@ async function doSearch() {
       carsList.appendChild(card);
     });
 
+    if (failedCount > 0) {
+      showToast(`Не вдалося завантажити ${failedCount} з ${ids.length} оголошень`);
+    }
+
   } catch(e) {
-    carsList.innerHTML = `<div class="empty-state"><div class="empty-icon">⚠️</div>Помилка завантаження.<br>Перевір інтернет і спробуй ще раз.</div>`;
+    console.error('Search failed:', e);
+    const detail = e.message || '';
+    const isLimit = /ліміт|лимит|limit|HourOverlimit/i.test(detail);
+    const msg = isLimit
+      ? 'Ліміт API запитів. Спробуй трохи пізніше.'
+      : 'Помилка завантаження.<br>Перевір інтернет і спробуй ще раз.';
+    carsList.innerHTML = `<div class="empty-state"><div class="empty-icon">⚠️</div>${msg}</div>`;
   }
 }
 
@@ -603,12 +634,14 @@ async function loadCarPhotos(autoId) {
   if (!autoId) return [];
   try {
     const res = await fetch(`${API}/auto/fotos/${autoId}?api_key=${API_KEY}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     const group = data?.data?.[autoId] || data?.data?.[String(autoId)] || {};
     return Object.values(group)
       .map(getBestPhotoUrl)
       .filter(Boolean);
   } catch(e) {
+    console.warn(`Failed to load photos for car ${autoId}:`, e);
     return [];
   }
 }
@@ -956,7 +989,14 @@ photoViewer.addEventListener('touchend', (e) => {
 }, { passive: true });
 
 // ── FILTERS ───────────────────────────────────────────────────────────────────
-function saveF() { try { localStorage.setItem('aria_filters', JSON.stringify(filters)); } catch(e){} }
+function saveF() {
+  try {
+    localStorage.setItem('aria_filters', JSON.stringify(filters));
+  } catch(e) {
+    console.error('Failed to save filters:', e);
+    showToast('Не вдалося зберегти підбірку (сховище переповнене)');
+  }
+}
 
 function descFilter(f) {
   const parts = [];
