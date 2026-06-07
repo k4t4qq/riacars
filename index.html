@@ -404,25 +404,17 @@ const resultsCount = document.getElementById('resultsCount');
 // ── LOAD BRANDS ───────────────────────────────────────────────────────────────
 async function loadBrands() {
   if (brandsPromise) return brandsPromise;
-  const cachedBrands = readCache('aria_brands');
-  if (cachedBrands.length && !brands.length) {
-    brands = cachedBrands;
+  if (readCache('aria_brands').length && !brands.length) {
+    brands = readCache('aria_brands');
     brandsLoaded = true;
     return true;
   }
 
   brandsPromise = (async () => {
     try {
-      const res = await fetch(`${API}/auto/categories/1/marks?api_key=${API_KEY}`);
-      const data = await res.json();
-      if (!Array.isArray(data)) throw new Error(data?.error || 'Bad marks response');
-      brands = data;
-      brandsLoaded = true;
-      writeCache('aria_brands', brands);
-      return true;
-    } catch(e) {
-      if (!brands.length) showToast(apiErrorText(e, 'марок'));
-      return false;
+      brands = await fetchCachedList('/auto/categories/1/marks', 'aria_brands', 'марок');
+      brandsLoaded = brands.length > 0;
+      return brandsLoaded;
     } finally {
       brandsPromise = null;
     }
@@ -432,21 +424,8 @@ async function loadBrands() {
 }
 
 async function loadModels(markId) {
-  const cacheKey = `aria_models_${markId}`;
-  const cachedModels = readCache(cacheKey);
-  if (cachedModels.length) models = cachedModels;
-
-  try {
-    const res = await fetch(`${API}/auto/categories/1/marks/${markId}/models?api_key=${API_KEY}`);
-    const data = await res.json();
-    if (!Array.isArray(data)) throw new Error(data?.error || 'Bad models response');
-    models = data;
-    writeCache(cacheKey, models);
-    return true;
-  } catch(e) {
-    if (!models.length) showToast(apiErrorText(e, 'моделей'));
-    return false;
-  }
+  models = await fetchCachedList(`/auto/categories/1/marks/${markId}/models`, `aria_models_${markId}`, 'моделей');
+  return models.length > 0;
 }
 
 function readCache(key) {
@@ -460,6 +439,28 @@ function readCache(key) {
 
 function writeCache(key, value) {
   try { localStorage.setItem(key, JSON.stringify(value)); } catch(e){}
+}
+
+async function apiFetch(path, params = {}) {
+  const url = new URL(`${API}${path}`);
+  url.searchParams.set('api_key', API_KEY);
+  Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
+  const res = await fetch(url);
+  return res.json();
+}
+
+async function fetchCachedList(apiPath, cacheKey, errorLabel) {
+  const cached = readCache(cacheKey);
+  let items = cached.length ? cached : [];
+  try {
+    const data = await apiFetch(apiPath);
+    if (!Array.isArray(data)) throw new Error(data?.error || `Bad ${errorLabel} response`);
+    items = data;
+    writeCache(cacheKey, items);
+  } catch(e) {
+    if (!items.length) showToast(apiErrorText(e, errorLabel));
+  }
+  return items;
 }
 
 function apiErrorText(error, label) {
@@ -497,6 +498,18 @@ function openDrop(anchorEl, items, labelKey, cb, emptyText = 'Нічого не 
 function closeDrop() { dropOverlay.classList.remove('open'); dropBox.innerHTML = ''; }
 dropOverlay.addEventListener('click', e => { if (e.target === dropOverlay) closeDrop(); });
 
+async function showFilteredDrop(inputEl, getItems, loadItems, loadingText, onSelect) {
+  const items = getItems();
+  if (!items.length) {
+    openDrop(inputEl, [], 'name', () => {}, loadingText);
+    await loadItems();
+    if (!getItems().length) return;
+  }
+  const q = inputEl.value.trim().toLowerCase();
+  const filtered = q ? getItems().filter(b => b.name.toLowerCase().includes(q)) : getItems();
+  openDrop(inputEl, filtered, 'name', onSelect);
+}
+
 // ── BRAND ─────────────────────────────────────────────────────────────────────
 brandInput.addEventListener('focus', () => showBrandDrop());
 brandInput.addEventListener('input', () => {
@@ -506,14 +519,7 @@ brandInput.addEventListener('input', () => {
 });
 
 async function showBrandDrop() {
-  if (!brands.length) {
-    openDrop(brandInput, [], 'name', () => {}, 'Завантажуємо марки…');
-    await loadBrands();
-    if (!brands.length) return;
-  }
-  const q = brandInput.value.trim().toLowerCase();
-  const list = q ? brands.filter(b => b.name.toLowerCase().includes(q)) : brands;
-  openDrop(brandInput, list, 'name', async (item) => {
+  await showFilteredDrop(brandInput, () => brands, loadBrands, 'Завантажуємо марки…', async (item) => {
     selectedBrand = item;
     brandInput.value = item.name;
     selectedModel = null; modelInput.value = ''; modelInput.disabled = false;
@@ -532,13 +538,7 @@ modelInput.addEventListener('input', () => {
 
 async function showModelDrop() {
   if (!selectedBrand) return;
-  if (!models.length) {
-    openDrop(modelInput, [], 'name', () => {}, 'Завантажуємо моделі…');
-    await loadModels(selectedBrand.value);
-  }
-  const q = modelInput.value.trim().toLowerCase();
-  const list = q ? models.filter(m => m.name.toLowerCase().includes(q)) : models;
-  openDrop(modelInput, list, 'name', (item) => {
+  await showFilteredDrop(modelInput, () => models, () => loadModels(selectedBrand.value), 'Завантажуємо моделі…', (item) => {
     selectedModel = item;
     modelInput.value = item.name;
     updateBtn();
@@ -558,7 +558,7 @@ async function doSearch() {
 
   try {
     const af = filters.find(f => f.id === activeFilter);
-    const params = new URLSearchParams({ api_key: API_KEY, category_id: 1, marka_id: selectedBrand.value, countpage: 20 });
+    const params = new URLSearchParams({ category_id: 1, marka_id: selectedBrand.value, countpage: 20 });
     if (selectedModel) params.set('model_id', selectedModel.value);
     if (af) {
       if (af.priceFrom) params.set('price_ot', af.priceFrom);
@@ -571,8 +571,7 @@ async function doSearch() {
       (af.gear||[]).forEach((v,i) => params.set(`gearbox_id[${i}]`, v));
     }
 
-    const res = await fetch(`${API}/auto/search?${params}`);
-    const data = await res.json();
+    const data = await apiFetch('/auto/search', Object.fromEntries(params));
 
     if (!data.result || !data.result.search_result || !data.result.search_result.ids?.length) {
       resultsCount.textContent = '0 оголошень';
@@ -586,7 +585,7 @@ async function doSearch() {
 
     carsList.innerHTML = '';
     const cars = await Promise.all(ids.map(id =>
-      fetch(`${API}/auto/info?api_key=${API_KEY}&auto_id=${id}`).then(r => r.json()).catch(() => null)
+      apiFetch('/auto/info', { auto_id: id }).catch(() => null)
     ));
 
     cars.filter(Boolean).forEach((car, i) => {
@@ -602,8 +601,7 @@ async function doSearch() {
 async function loadCarPhotos(autoId) {
   if (!autoId) return [];
   try {
-    const res = await fetch(`${API}/auto/fotos/${autoId}?api_key=${API_KEY}`);
-    const data = await res.json();
+    const data = await apiFetch(`/auto/fotos/${autoId}`);
     const group = data?.data?.[autoId] || data?.data?.[String(autoId)] || {};
     return Object.values(group)
       .map(getBestPhotoUrl)
@@ -661,6 +659,16 @@ function addPhoto(photos, url) {
   if (url && !photos.includes(url)) photos.push(url);
 }
 
+function collectCarPhotos(car) {
+  const photos = [];
+  if (car.photoData) addPhoto(photos, getBestPhotoUrl(car.photoData));
+  (car.galleryPhotos || []).forEach(url => addPhoto(photos, url));
+  if (car.additionalParams?.photos?.length) {
+    car.additionalParams.photos.slice(0, 6).forEach(p => addPhoto(photos, getBestPhotoUrl(p)));
+  }
+  return photos;
+}
+
 function buildSlideHTML(url, title, photoIndex, cardIndex) {
   return `
     <div class="car-slide" data-photo="${photoIndex}" data-card="${cardIndex}">
@@ -687,24 +695,7 @@ function buildCarCard(car, index) {
   // Try multiple link formats - Auto.ria changes them frequently
   const link = car.linkToView ? `https://auto.ria.com${car.linkToView}` : `https://auto.ria.com/uk/auto_${autoId}.html`;
 
-  // Photos - collect high quality versions
-  const photos = [];
-  
-  // Main photo - prefer largest size
-  if (car.photoData) {
-    // seoLinkF is full size (biggest), seoLinkB is big, seoLinkM is medium
-    addPhoto(photos, car.photoData.seoLinkF || car.photoData.seoLinkB || car.photoData.seoLinkM);
-  }
-
-  (car.galleryPhotos || []).forEach(url => addPhoto(photos, url));
-  
-  // Additional photos
-  if (car.additionalParams?.photos?.length) {
-    car.additionalParams.photos.slice(0, 6).forEach(p => {
-      const url = p.seoLinkF || p.seoLinkB || p.seoLinkM;
-      addPhoto(photos, url);
-    });
-  }
+  const photos = collectCarPhotos(car);
   
   const photoCount = car.photoData?.count || photos.length || 0;
   const canHaveMorePhotos = photoCount > 1;
@@ -956,7 +947,7 @@ photoViewer.addEventListener('touchend', (e) => {
 }, { passive: true });
 
 // ── FILTERS ───────────────────────────────────────────────────────────────────
-function saveF() { try { localStorage.setItem('aria_filters', JSON.stringify(filters)); } catch(e){} }
+function saveF() { writeCache('aria_filters', filters); }
 
 function descFilter(f) {
   const parts = [];
@@ -976,7 +967,7 @@ function renderFilters() {
       <div class="f-dot"></div>
       <div class="f-info">
         <div class="f-name">${f.name}</div>
-        ${descFilter(f) ? `<div class="f-desc">${descFilter(f)}</div>` : ''}
+        ${(() => { const d = descFilter(f); return d ? `<div class="f-desc">${d}</div>` : ''; })()}
       </div>
       <div class="f-btns">
         <button class="f-btn eb" data-id="${f.id}">✏️</button>
@@ -1005,20 +996,30 @@ addFilterBtn.addEventListener('click', () => openModal());
 document.getElementById('cancelBtn').addEventListener('click', closeModal);
 modalBg.addEventListener('click', e => { if (e.target===modalBg) closeModal(); });
 
+const MODAL_FIELDS = ['mName','mPriceFrom','mPriceTo','mYearFrom','mYearTo','mMileFrom','mMileTo'];
+const MODAL_FIELD_KEYS = ['name','priceFrom','priceTo','yearFrom','yearTo','mileFrom','mileTo'];
+const MODAL_TAG_GROUPS = [{ id: 'fuelTags', key: 'fuel' }, { id: 'gearTags', key: 'gear' }];
+
+function setModalFields(pre) {
+  MODAL_FIELDS.forEach((id, i) => document.getElementById(id).value = pre?.[MODAL_FIELD_KEYS[i]] || '');
+  MODAL_TAG_GROUPS.forEach(({ id, key }) => {
+    document.querySelectorAll(`#${id} .tag`).forEach(t => t.classList.toggle('on', pre?.[key]?.includes(t.dataset.v) || false));
+  });
+}
+
+function getModalFields() {
+  const obj = {};
+  MODAL_FIELDS.forEach((id, i) => obj[MODAL_FIELD_KEYS[i]] = document.getElementById(id).value);
+  MODAL_TAG_GROUPS.forEach(({ id, key }) => {
+    obj[key] = [...document.querySelectorAll(`#${id} .tag.on`)].map(t => t.dataset.v);
+  });
+  return obj;
+}
+
 function openModal(pre) {
   editId = pre?.id || null;
   document.getElementById('modalTitle').textContent = pre ? 'Редагувати' : 'Нова підбірка';
-  document.getElementById('mName').value = pre?.name || '';
-  document.getElementById('mPriceFrom').value = pre?.priceFrom || '';
-  document.getElementById('mPriceTo').value = pre?.priceTo || '';
-  document.getElementById('mYearFrom').value = pre?.yearFrom || '';
-  document.getElementById('mYearTo').value = pre?.yearTo || '';
-  document.getElementById('mMileFrom').value = pre?.mileFrom || '';
-  document.getElementById('mMileTo').value = pre?.mileTo || '';
-  ['fuelTags','gearTags'].forEach(id => {
-    const key = id==='fuelTags'?'fuel':'gear';
-    document.querySelectorAll(`#${id} .tag`).forEach(t => t.classList.toggle('on', pre?.[key]?.includes(t.dataset.v)||false));
-  });
+  setModalFields(pre);
   document.getElementById('modalSheet').scrollTop = 0;
   modalBg.classList.add('open');
   setTimeout(() => document.getElementById('mName').focus(), 150);
@@ -1028,19 +1029,9 @@ function closeModal() { modalBg.classList.remove('open'); }
 document.querySelectorAll('.tag').forEach(t => t.addEventListener('click', () => t.classList.toggle('on')));
 
 document.getElementById('saveBtn').addEventListener('click', () => {
-  const name = document.getElementById('mName').value.trim();
-  if (!name) { document.getElementById('mName').focus(); return; }
-  const sel = id => [...document.querySelectorAll(`#${id} .tag.on`)].map(t=>t.dataset.v);
-  const f = {
-    id: editId || Date.now().toString(), name,
-    priceFrom: document.getElementById('mPriceFrom').value,
-    priceTo: document.getElementById('mPriceTo').value,
-    yearFrom: document.getElementById('mYearFrom').value,
-    yearTo: document.getElementById('mYearTo').value,
-    mileFrom: document.getElementById('mMileFrom').value,
-    mileTo: document.getElementById('mMileTo').value,
-    fuel: sel('fuelTags'), gear: sel('gearTags'),
-  };
+  const fields = getModalFields();
+  if (!fields.name.trim()) { document.getElementById('mName').focus(); return; }
+  const f = { id: editId || Date.now().toString(), ...fields, name: fields.name.trim() };
   if (editId) { const i=filters.findIndex(x=>x.id===editId); if(i>=0) filters[i]=f; } else filters.push(f);
   saveF(); renderFilters(); closeModal();
   showToast(editId ? 'Підбірку оновлено ✓' : 'Підбірку збережено ✓');
