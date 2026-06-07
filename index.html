@@ -375,8 +375,21 @@ body::before {
 </div>
 
 <script>
-const API_KEY = 'ZVNRZkOynlMimsOpzhVmxjj1zXsUw8HM4VEBrE4K';
 const API = 'https://developers.ria.com';
+
+// Load API key from localStorage; prompt the user if missing.
+function getApiKey() {
+  let key = localStorage.getItem('ria_api_key');
+  if (key) return key;
+  key = prompt('Введіть ваш Auto.ria API ключ (отримати: https://developers.ria.com/)');
+  if (key && key.trim()) {
+    localStorage.setItem('ria_api_key', key.trim());
+    return key.trim();
+  }
+  return null;
+}
+
+let API_KEY = getApiKey();
 
 // ── STATE ─────────────────────────────────────────────────────────────────────
 let brands = [], models = [];
@@ -482,10 +495,10 @@ function openDrop(anchorEl, items, labelKey, cb, emptyText = 'Нічого не 
   dropBox.style.maxHeight = maxH + 'px';
 
   if (!items.length) {
-    dropBox.innerHTML = `<div class="drop-empty">${emptyText}</div>`;
+    dropBox.innerHTML = `<div class="drop-empty">${escapeHTML(emptyText)}</div>`;
   } else {
     dropBox.innerHTML = items.slice(0, 60).map(it =>
-      `<div class="drop-item" data-idx="${items.indexOf(it)}"><span class="di">›</span>${it[labelKey]}</div>`
+      `<div class="drop-item" data-idx="${items.indexOf(it)}"><span class="di">›</span>${escapeHTML(it[labelKey])}</div>`
     ).join('');
     dropBox.querySelectorAll('.drop-item').forEach((el, i) => {
       el.addEventListener('click', e => { e.stopPropagation(); closeDrop(); cb(items[i]); });
@@ -972,15 +985,15 @@ function descFilter(f) {
 function renderFilters() {
   if (!filters.length) { filterList.innerHTML = '<div class="no-filters">Підбірок поки немає</div>'; return; }
   filterList.innerHTML = filters.map(f => `
-    <div class="f-chip ${activeFilter===f.id?'on':''}" data-id="${f.id}">
+    <div class="f-chip ${activeFilter===f.id?'on':''}" data-id="${escapeHTML(f.id)}">
       <div class="f-dot"></div>
       <div class="f-info">
-        <div class="f-name">${f.name}</div>
-        ${descFilter(f) ? `<div class="f-desc">${descFilter(f)}</div>` : ''}
+        <div class="f-name">${escapeHTML(f.name)}</div>
+        ${descFilter(f) ? `<div class="f-desc">${escapeHTML(descFilter(f))}</div>` : ''}
       </div>
       <div class="f-btns">
-        <button class="f-btn eb" data-id="${f.id}">✏️</button>
-        <button class="f-btn db" data-id="${f.id}">🗑</button>
+        <button class="f-btn eb" data-id="${escapeHTML(f.id)}">✏️</button>
+        <button class="f-btn db" data-id="${escapeHTML(f.id)}">🗑</button>
       </div>
     </div>`).join('');
 
